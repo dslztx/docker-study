@@ -8,4 +8,6 @@ RUN apt-get --yes install mariadb-client
 
 ADD apache-zookeeper-3.7.0-bin.tar.gz /root/
 
+WORKDIR /root
+
 CMD ["/bin/bash", "-c", "tail -f /dev/null"]
