@@ -4,4 +4,6 @@ COPY Main.class /
 
 WORKDIR /
 
-CMD ["java","Main"]
+#CMD ["java","Main"]
+
+CMD ["/bin/bash", "-c", "tail -f /dev/null"]
