@@ -1,7 +1,6 @@
-FROM openjdk8-base:1.0.0
+FROM openjdk8-base:3.0.0
 
-# 基础镜像中就是使用了替换源
-# COPY sources.list /etc/apt
+# 基础镜像中已经完成apt-get update
 
 RUN apt-get --yes install redis-tools
 RUN apt-get --yes install mariadb-client
