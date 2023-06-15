@@ -1,4 +1,4 @@
-FROM debian9-base:1.0.0
+FROM debian11.7-base:1.0.0
 
 COPY jdk8u345-b01 /usr/java/jdk8/
 
