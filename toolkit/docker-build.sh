@@ -1,3 +1,3 @@
 #!/bin/bash
 
-docker build -t toolkit:$1 .
+docker build --build-arg DOCKER_HUB_ARG=$DOCKER_HUB -t $DOCKER_HUB/toolkit:$1 .

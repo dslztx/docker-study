@@ -1,4 +1,6 @@
-FROM openjdk8-base:3.0.0
+ARG DOCKER_HUB_ARG
+
+FROM ${DOCKER_HUB_ARG}/openjdk8-base:4.0.0
 
 # 基础镜像中已经完成apt-get update
 
