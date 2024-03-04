@@ -1,6 +1,6 @@
 ARG DOCKER_HUB_ARG
 
-FROM ${DOCKER_HUB_ARG}/debian11.7-base:2.0.0
+FROM ${DOCKER_HUB_ARG}/debian11.7-base:3.0.0
 
 COPY jdk8u345-b01 /usr/java/jdk8/
 
