@@ -17,6 +17,9 @@ RUN apt-get --yes install curl
 RUN apt-get --yes install iputils-ping
 RUN apt-get --yes install lftp
 
+# parallel running lib
+RUN apt-get --yes install libgomp1
+
 RUN apt-get --yes install locales
 RUN echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen && locale-gen en_US.UTF-8
 
