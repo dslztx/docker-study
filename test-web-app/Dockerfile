@@ -1,6 +1,6 @@
-ARG DOCKER_HUB_ARG
+ARG DOCKER_HUB_ARG=docker.io
 
-FROM ${DOCKER_HUB_ARG}/openjdk8-base:4.0.0
+FROM ${DOCKER_HUB_ARG}/openjdk21-base:1.0.0
 
 COPY web-1.0.0-jar-with-dependencies.jar /
 COPY run.sh /

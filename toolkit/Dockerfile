@@ -1,8 +1,9 @@
-ARG DOCKER_HUB_ARG
+ARG DOCKER_HUB_ARG=docker.io
 
-FROM ${DOCKER_HUB_ARG}/openjdk8-base:5.0.0
+FROM ${DOCKER_HUB_ARG}/openjdk21-base:1.0.0
 
-# 基础镜像中已经完成apt-get update
+# 不能基础镜像中已经有这里就不做，这个需要实时更新
+RUN apt-get update
 
 RUN apt-get --yes install redis-tools
 RUN apt-get --yes install mariadb-client
