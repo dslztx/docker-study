@@ -1,0 +1,10 @@
+/rsync/rsyncd.log {
+    weekly              # 轮转周期，也可用 daily 或 monthly
+    rotate 4            # 保留最近 4 份旧日志，更早的自动删除
+    maxsize 100M        # 当日志超过 100M 时，即使未到周期也会触发轮转
+    compress            # 压缩旧日志，节省空间
+    delaycompress       # 本次轮转出的日志先不压缩，方便立即查看
+    missingok           # 日志文件不存在时不报错
+    notifempty          # 日志为空时不轮转
+    copytruncate        # 关键：先复制再清空原文件，rsync 无需重启
+}
