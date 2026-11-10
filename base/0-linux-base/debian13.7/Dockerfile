@@ -18,6 +18,7 @@ RUN apt-get --yes install iputils-ping
 RUN apt-get --yes install lftp
 RUN apt-get --yes install vsftpd
 RUN apt-get --yes install rsync
+RUN apt-get --yes install tree
 
 # parallel running lib
 RUN apt-get --yes install libgomp1
