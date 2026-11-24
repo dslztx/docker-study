@@ -1,0 +1,454 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# 兼容 Python 2.7 与 Python 3.x
+# 说明：原版本是纯 Python 3 代码（f-string、http.server、urllib.parse、
+# sys.stdout.reconfigure 等），在 Python 2.7.18 下无法运行；同时去掉了对
+# cgi 模块的依赖，改为内置的流式 multipart 解析，避免“缺失 cgi 模块”问题。
+
+from __future__ import print_function, unicode_literals
+
+from datetime import datetime, timedelta
+import locale
+import os
+import re
+import sys
+import threading
+import time
+
+try:
+    # Python 2
+    from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
+except ImportError:
+    # Python 3
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+try:
+    # Python 2
+    from urllib import quote as _quote, unquote as _unquote
+except ImportError:
+    # Python 3
+    from urllib.parse import quote as _quote, unquote as _unquote
+
+try:
+    # Python 3
+    from urllib.parse import unquote_to_bytes as _unquote_to_bytes
+except ImportError:
+    # Python 2
+    def _unquote_to_bytes(value):
+        if not isinstance(value, bytes):
+            value = value.encode('latin-1')
+        return _unquote(value)
+
+
+PY2 = sys.version_info[0] == 2
+
+if PY2:
+    import codecs
+    # Python 2 在重定向输出时默认编码可能是 ASCII，这里统一成 UTF-8。
+    # 注意：不要包装 stderr，否则标准库打印 traceback 时会因 unicode/bytes
+    # 混用而再次抛出 UnicodeDecodeError。
+    try:
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
+    except Exception:
+        pass
+
+
+# 尽力把 locale 设置为 UTF-8，保证中文文件名读写正常
+for _loc in ('C.UTF-8', 'en_US.UTF-8', ''):
+    try:
+        locale.setlocale(locale.LC_ALL, _loc)
+        break
+    except Exception:
+        continue
+
+
+def to_text(value, encoding='utf-8'):
+    if isinstance(value, bytes):
+        return value.decode(encoding, 'replace')
+    return value
+
+
+def to_bytes(value, encoding='utf-8'):
+    if isinstance(value, bytes):
+        return value
+    return value.encode(encoding, 'replace')
+
+
+if PY2:
+    def fs_encode(name):
+        if isinstance(name, bytes):
+            return name
+        enc = sys.getfilesystemencoding() or 'utf-8'
+        try:
+            return name.encode(enc)
+        except Exception:
+            return name.encode('utf-8')
+else:
+    def fs_encode(name):
+        return name
+
+
+def url_quote(value):
+    return _quote(to_bytes(value))
+
+
+def url_unquote(value):
+    result = _unquote(to_bytes(value))
+    if isinstance(result, bytes):
+        return result.decode('utf-8', 'replace')
+    return result
+
+
+def html_escape(text):
+    text = to_text(text)
+    return (text.replace('&', '&amp;')
+                .replace('<', '&lt;')
+                .replace('>', '&gt;')
+                .replace('"', '&quot;'))
+
+
+def emit(message):
+    """带编码兜底的日志输出，兼容 Python 2/3 及重定向。"""
+    message = to_text(message)
+    try:
+        sys.stdout.write(message + '\n')
+    except (UnicodeEncodeError, TypeError):
+        data = (message + '\n').encode('utf-8', 'replace')
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout.buffer.write(data)
+        else:
+            sys.stdout.write(data)
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+# 需要保留的文件（不清理）
+PROTECTED_FILES = {'webfile', 'nohup.out'}
+
+# 设置最大上传文件大小（50GB）
+MAX_FILE_SIZE = 50 * 1024 * 1024 * 1024
+
+
+def clean_directory():
+    """清理当前目录，删除除 webfile 外的所有文件"""
+    current_dir = os.getcwd()
+    deleted_count = 0
+    for filename in os.listdir(current_dir):
+        filepath = os.path.join(current_dir, filename)
+        # 跳过保护文件和目录
+        if filename in PROTECTED_FILES or to_text(filename) in PROTECTED_FILES:
+            continue
+        if os.path.isfile(filepath):
+            try:
+                os.remove(filepath)
+                deleted_count += 1
+                emit('🗑️  已删除: %s' % to_text(filename))
+            except Exception as e:
+                emit('❌ 删除失败 %s: %s' % (to_text(filename), e))
+    if deleted_count > 0:
+        emit('✅ 清理完成，共删除 %d 个文件' % deleted_count)
+    else:
+        emit('📂 无需清理')
+
+
+def schedule_daily_clean():
+    """每天定时清理任务"""
+    while True:
+        now = datetime.now()
+        # 计算下一个 14:30 的时间
+        next_run = now.replace(hour=14, minute=30, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+
+        wait_seconds = (next_run - now).total_seconds()
+        emit('⏰ 下次清理时间: %s' % next_run.strftime('%Y-%m-%d %H:%M:%S'))
+        time.sleep(wait_seconds)
+
+        emit('🧹 开始每日清理 (%s)...' % datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        clean_directory()
+
+
+class _BufferedReader(object):
+    """带缓冲的读取器，支持按行读取和流式查找 multipart 边界。"""
+
+    def __init__(self, rfile, chunk_size=64 * 1024, max_bytes=None):
+        self.rfile = rfile
+        self.chunk_size = chunk_size
+        self.remaining = max_bytes
+        self.buf = b''
+
+    def _fill(self):
+        # 严格限制读取量，绝不能读取超过 Content-Length 的字节。
+        # socket 的 read(n) 会一直阻塞到读满 n 字节或对端关闭，如果请求体
+        # 已经结束却还继续 read(64KB)，就会和等待响应的客户端互相死锁。
+        if self.remaining is not None:
+            if self.remaining <= 0:
+                return False
+            size = min(self.chunk_size, self.remaining)
+        else:
+            size = self.chunk_size
+
+        chunk = self.rfile.read(size)
+        if not chunk:
+            return False
+        if self.remaining is not None:
+            self.remaining -= len(chunk)
+        self.buf += chunk
+        return True
+
+    def drain(self):
+        """丢弃请求体中尚未读取的字节，避免关闭连接时触发 RST。"""
+        if self.remaining is None:
+            return
+        while self.remaining > 0:
+            size = min(self.chunk_size, self.remaining)
+            chunk = self.rfile.read(size)
+            if not chunk:
+                break
+            self.remaining -= len(chunk)
+
+    def readline(self):
+        while b'\n' not in self.buf:
+            if not self._fill():
+                line, self.buf = self.buf, b''
+                return line
+        pos = self.buf.find(b'\n') + 1
+        line, self.buf = self.buf[:pos], self.buf[pos:]
+        return line
+
+    def stream_until(self, delimiter, out):
+        """把 delimiter 之前的内容流式写入 out，并消费掉 delimiter。"""
+        while True:
+            pos = self.buf.find(delimiter)
+            if pos != -1:
+                out.write(self.buf[:pos])
+                self.buf = self.buf[pos + len(delimiter):]
+                return True
+
+            # 保留一个足够长的尾部，避免 delimiter 被分块截断
+            keep = len(delimiter) + 4
+            if len(self.buf) > keep:
+                cut = len(self.buf) - keep
+                out.write(self.buf[:cut])
+                self.buf = self.buf[cut:]
+
+            if not self._fill():
+                out.write(self.buf)
+                self.buf = b''
+                return False
+
+
+def _parse_boundary(content_type):
+    match = re.search(r'boundary\s*=\s*(?:"([^"]+)"|([^;]+))',
+                      to_text(content_type), re.I)
+    if not match:
+        raise ValueError('缺少 multipart boundary')
+    boundary = match.group(1) or match.group(2)
+    return boundary.strip().encode('ascii')
+
+
+def _parse_disposition_filename(disposition):
+    """从 Content-Disposition 中解析文件名，支持 RFC 5987 filename*。"""
+    if not disposition:
+        return None
+
+    # filename*=UTF-8''%E4%B8%AD%E6%96%87.txt
+    match = re.search(r"filename\*\s*=\s*([^;]+)", disposition, re.I)
+    if match:
+        value = match.group(1).strip().strip('"')
+        parts = value.split("'", 2)
+        if len(parts) == 3:
+            charset, _lang, encoded = parts
+            try:
+                raw = _unquote_to_bytes(encoded)
+                return raw.decode(charset or 'utf-8', 'replace')
+            except Exception:
+                pass
+
+    match = re.search(r'filename\s*=\s*"((?:[^"\\]|\\.)*)"', disposition, re.I)
+    if not match:
+        match = re.search(r'filename\s*=\s*([^;]+)', disposition, re.I)
+    if not match:
+        return None
+
+    raw = match.group(1).strip().strip('"')
+    # disposition 是按 latin-1 解码的，这里还原成原始字节再按 UTF-8 解码
+    try:
+        data = raw.encode('latin-1')
+    except Exception:
+        data = to_bytes(raw)
+    try:
+        return data.decode('utf-8')
+    except Exception:
+        return data.decode('latin-1', 'replace')
+
+
+def _read_headers(reader):
+    headers = {}
+    while True:
+        line = reader.readline()
+        if not line or line in (b'\r\n', b'\n'):
+            break
+        if b':' not in line:
+            continue
+        name, value = line.split(b':', 1)
+        headers[name.strip().lower()] = value.strip()
+    return headers
+
+
+def save_multipart(rfile, content_type, content_length=None):
+    """流式解析 multipart/form-data 并保存上传文件，返回保存的文件名列表。"""
+    boundary = _parse_boundary(content_type)
+    first_boundary = b'--' + boundary
+    delimiter = b'\r\n--' + boundary
+
+    reader = _BufferedReader(rfile, max_bytes=content_length)
+
+    # 跳过 preamble，定位第一个边界
+    while True:
+        line = reader.readline()
+        if not line:
+            raise ValueError('上传数据不完整：未找到 multipart 起始边界')
+        if line.strip() == first_boundary:
+            break
+
+    saved = []
+    while True:
+        headers = _read_headers(reader)
+        disposition = headers.get(b'content-disposition', b'')
+        filename = _parse_disposition_filename(disposition.decode('latin-1'))
+
+        if filename is not None:
+            safe_name = os.path.basename(filename.replace('\\', '/'))
+            if not safe_name or safe_name in ('.', '..'):
+                safe_name = 'upload_%d' % int(time.time())
+
+            target = fs_encode(safe_name)
+            with open(target, 'wb') as out:
+                found = reader.stream_until(delimiter, out)
+            if not found:
+                raise ValueError('上传数据不完整：未找到 multipart 结束边界')
+            saved.append(safe_name)
+        else:
+            # 非文件字段直接丢弃
+            devnull = open(os.devnull, 'wb')
+            try:
+                found = reader.stream_until(delimiter, devnull)
+            finally:
+                devnull.close()
+            if not found:
+                raise ValueError('上传数据不完整：未找到 multipart 结束边界')
+
+        # 边界后是 "--" 表示结束，否则是下一段
+        tail = reader.readline()
+        if tail.startswith(b'--'):
+            break
+        if not tail:
+            raise ValueError('上传数据不完整：边界后数据缺失')
+
+    # 消费可能存在的 epilogue，保证请求体被完整读取
+    reader.drain()
+    return saved
+
+
+class FileHandler(BaseHTTPRequestHandler):
+    def address_string(self):
+        return self.client_address[0]
+
+    def log_message(self, format, *args):
+        emit('[%s] %s' % (self.address_string(), format % args))
+
+    def do_GET(self):
+        path = url_unquote(self.path.split('?', 1)[0])
+
+        if path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+
+            html = [
+                '<!DOCTYPE html>',
+                '<html>',
+                '<head>',
+                '<meta charset="UTF-8">',
+                '<title>文件服务</title>',
+                '</head>',
+                '<body>',
+                '<h2>📤 文件上传 &amp; 下载</h2>',
+                '<form method="post" enctype="multipart/form-data">',
+                '<input type="file" name="file" multiple>',
+                '<button type="submit">上传文件</button>',
+                '</form>',
+                '<hr>',
+                '<h3>📂 文件列表</h3>',
+            ]
+
+            for name in sorted(os.listdir('.')):
+                if os.path.isfile(name):
+                    text_name = to_text(name)
+                    url = url_quote(text_name)
+                    html.append('<a href="%s" download>%s</a><br>'
+                                % (url, html_escape(text_name)))
+
+            html.append('</body></html>')
+            self.wfile.write('\n'.join(html).encode('utf-8'))
+        else:
+            file_path = path.lstrip('/')
+            if os.path.isfile(fs_encode(file_path)):
+                with open(fs_encode(file_path), 'rb') as f:
+                    content = f.read()
+                self.send_response(200)
+                fn = url_quote(os.path.basename(file_path))
+                self.send_header('Content-Disposition',
+                                 "attachment; filename*=UTF-8''%s" % fn)
+                self.send_header('Content-Length', str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+            else:
+                self.send_error(404, '文件不存在')
+
+    def do_POST(self):
+        try:
+            content_length = self.headers.get('Content-Length')
+            if content_length:
+                content_length = int(content_length)
+                if content_length > MAX_FILE_SIZE:
+                    self.send_error(
+                        413,
+                        '文件太大，最大允许%.1fGB'
+                        % (MAX_FILE_SIZE / float(1024 * 1024 * 1024)))
+                    return
+
+            content_type = self.headers.get('Content-Type', '')
+            saved = save_multipart(self.rfile, content_type, content_length)
+
+            for name in saved:
+                emit('✅ 文件上传成功: %s' % name)
+
+            self.send_response(303)
+            self.send_header('Location', '/')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        except Exception as e:
+            emit('❌ 上传失败: %s' % e)
+            try:
+                self.send_error(500, '上传失败: %s' % e)
+            except Exception:
+                pass
+
+
+if __name__ == '__main__':
+    # 启动定时清理线程
+    clean_thread = threading.Thread(target=schedule_daily_clean)
+    clean_thread.daemon = True
+    clean_thread.start()
+    emit('✅ 每日清理任务已启动（每天14:30执行）')
+
+    server = HTTPServer(('0.0.0.0', 80), FileHandler)
+    emit('✅ 服务已启动：http://0.0.0.0:80')
+    emit('✅ 完美支持中文文件名')
+    server.serve_forever()

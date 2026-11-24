@@ -16,9 +16,9 @@ RUN apt-get --yes install net-tools
 RUN apt-get --yes install curl
 RUN apt-get --yes install iputils-ping
 RUN apt-get --yes install lftp
-RUN apt-get --yes install vsftpd
 RUN apt-get --yes install rsync
 RUN apt-get --yes install tree
+RUN apt-get --yes install pv
 
 # parallel running lib
 RUN apt-get --yes install libgomp1

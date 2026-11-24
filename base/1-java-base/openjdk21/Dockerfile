@@ -1,6 +1,6 @@
 ARG DOCKER_HUB_ARG=docker.io
 
-FROM ${DOCKER_HUB_ARG}/debian11.7-base:5.0.0
+FROM ${DOCKER_HUB_ARG}/debian13.7-base:3.0.0
 
 COPY eclipse-temurin-openjdk21 /usr/java/jdk21/
 
